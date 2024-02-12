@@ -11,7 +11,8 @@ import torch.nn.functional as F
 import wandb
 
 from tqdm import tqdm
-from transformers import Adafactor, AdamW, get_linear_schedule_with_warmup
+from transformers import Adafactor, get_linear_schedule_with_warmup
+from torch.optim import AdamW
 from transformers import AutoModelForCausalLM
 
 from utils.utils import get_checkpoint_id, download_file
@@ -83,6 +84,8 @@ class MetaICLModel(object):
         '''
         checkpoint can be either keyword of the model or path to the checkpoint file
         '''
+
+        self.dtype = torch.float16 if self.fp16 else torch.float32
         if checkpoint is not None and checkpoint.startswith("gpt"):
             gpt2 = checkpoint
             checkpoint = None
@@ -149,8 +152,8 @@ class MetaICLModel(object):
                               lr=lr,
                               eps=1e-08,
                               weight_decay=weight_decay)
-            if self.fp16:
-                self.model, optimizer = setup_fp16(self.model, optimizer)
+            # if self.fp16:
+                # self.model, optimizer = setup_fp16(self.model, optimizer)
             if optimization=="adamw":
                 scheduler = get_linear_schedule_with_warmup(optimizer,
                                                             num_warmup_steps=warmup_steps,
@@ -161,13 +164,16 @@ class MetaICLModel(object):
             import bitsandbytes as bnb
             optimizer = bnb.optim.Adam8bit(optimizer_grouped_parameters,
                                            lr=lr, betas=(0.9, 0.995))
-            if self.fp16:
-                self.model, optimizer = setup_fp16(self.model, optimizer)
+            # if self.fp16:
+                # self.model, optimizer = setup_fp16(self.model, optimizer)
             scheduler = get_linear_schedule_with_warmup(optimizer,
                                                         num_warmup_steps=warmup_steps,
                                                         num_training_steps=num_training_steps)
         else:
             raise NotImplementedError()
+
+        if self.fp16:
+            self.scaler = torch.cuda.amp.GradScaler()
 
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -216,9 +222,7 @@ class MetaICLModel(object):
                 train_losses.append(loss.detach().cpu())
 
                 if self.fp16:
-                    from apex import amp
-                    with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                        scaled_loss.backward()
+                    self.scaler.scale(loss).backward()
                 else:
                     loss.backward()
                 wandb.log({"train loss": loss.item()})
@@ -278,18 +282,21 @@ class MetaICLModel(object):
         return predictions
 
     def run_model(self, input_ids, attention_mask, token_type_ids, labels=None):
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits[..., :-1, :].contiguous()
+        with torch.autocast(device_type="cuda", dtype=self.dtype):
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
 
-        if labels is None:
-            labels = input_ids
-        labels = labels[..., 1:].contiguous()
-        label_mask = token_type_ids[..., 1:].contiguous()
+            logits = outputs.logits[..., :-1, :].contiguous()
 
-        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-        losses = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)) # [batch_size, length]
+            if labels is None:
+                labels = input_ids
+            labels = labels[..., 1:].contiguous()
+            label_mask = token_type_ids[..., 1:].contiguous()
 
-        losses = losses.view(logits.size(0), logits.size(1)) * label_mask
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+            losses = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)) # [batch_size, length]
+
+            losses = losses.view(logits.size(0), logits.size(1)) * label_mask
+
         return torch.sum(losses, axis=1) / torch.sum(label_mask, axis=1)
 
 def setup_fp16(model, optimizer):
