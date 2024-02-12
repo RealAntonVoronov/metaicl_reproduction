@@ -87,7 +87,7 @@ class MetaICLModel(object):
             checkpoint = None
         if checkpoint is None and "gpt" not in gpt2:
             checkpoint = gpt2
-            gpt2 = "gpt2-large"
+            # gpt2 = "gpt2-large"
         if checkpoint is None:
             if gpt2.startswith("gpt2"):
                 model = AutoModelForCausalLM.from_pretrained(gpt2)
@@ -107,14 +107,19 @@ class MetaICLModel(object):
                     if os.path.exists(checkpoint):
                         self.logger.info("Reusing checkpoint at %s" % checkpoint)
                     else:
-                        self.logger.info("Downloading %s in %s", keyword, checkpoint)
+                        self.logger.info(f"Downloading {keyword} in {checkpoint}")
                     download_file(_id, checkpoint)
 
-            assert os.path.exists(checkpoint), checkpoint
-            if self.local_rank <= 0:
-                self.logger.info("Loading the model from %s" % checkpoint)
-            state_dict = torch.load(checkpoint)
-            model = AutoModelForCausalLM.from_pretrained(gpt2, state_dict=state_dict)
+            if os.path.exists(checkpoint):
+                if self.local_rank <= 0:
+                    self.logger.info("Loading the model from %s" % checkpoint)
+                state_dict = torch.load(checkpoint)
+                model = AutoModelForCausalLM.from_pretrained(gpt2, torch_dtype=self.dtype, state_dict=state_dict)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(gpt2,
+                                                             # device_map='auto',
+                                                             torch_dtype=self.dtype,
+                                                             )
         self.model = model
 
     def save(self, step):

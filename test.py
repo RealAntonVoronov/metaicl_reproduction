@@ -32,7 +32,7 @@ def main(logger, args):
     if args.gpt2.startswith("gpt2"):
         tokenizer = GPT2Tokenizer.from_pretrained(args.gpt2)
     else:
-        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        tokenizer = AutoTokenizer.from_pretrained(args.gpt2)
     add_newlines = True
 
     ### checkpoint ...
@@ -45,7 +45,7 @@ def main(logger, args):
             checkpoint = os.path.join(args.out_dir, "model-{}.pt".format(args.global_step))
         assert os.path.exists(checkpoint)
     else:
-        add_newlines = not args.gpt2.startswith("gpt2")
+        # add_newlines = not args.gpt2.startswith("gpt2")
         if False: #args.gpt2=="gpt-j-6B":
             # we are using the HF veresion where GPT-J-6B checkpoint is not officially registered
             # so need to download the model checkpoint and specify checkpoint

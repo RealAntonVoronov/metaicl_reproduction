@@ -27,7 +27,7 @@ def main(logger, args):
     if args.gpt2.startswith("gpt2"):
         tokenizer = GPT2Tokenizer.from_pretrained(args.gpt2)
     else:
-        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        tokenizer = AutoTokenizer.from_pretrained(args.gpt2)
 
     batch_size = args.batch_size
     max_length_per_example = 256
