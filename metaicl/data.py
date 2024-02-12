@@ -12,6 +12,7 @@ import numpy as np
 import pickle as pkl
 import math
 import torch
+from tqdm import tqdm
 
 from collections import defaultdict
 from functools import partial
@@ -24,6 +25,11 @@ class MetaICLData(object):
     def __init__(self, logger=None, tokenizer=None, method="channel", use_demonstrations=True, k=16,
                  max_length=1024, max_length_per_example=256, input_verbalizer='{}', output_verbalizer='{}',
                  do_tensorize=False, tensorize_dir=None, n_process=None, n_gpu=None, local_rank=-1):
+        if logger is None:
+            class Logger():
+                def info(self, text):
+                    print("Logging from MetaICLData:\t", text)
+            logger = Logger()
 
         self.logger = logger
         self.tokenizer = tokenizer
@@ -238,7 +244,7 @@ class MetaICLData(object):
                     return [r]
                 return [r] + _draw_random(tot, n-1, exclude_indices | set([r]))
 
-            for dp_idx, dp in enumerate(train_data):
+            for dp_idx, dp in enumerate(tqdm(train_data)):
                 for _ in range(N):
                     demo_indices = _draw_random(len(train_data), self.k, set([dp_idx]))
                     inputs = []
@@ -462,7 +468,7 @@ class MetaICLData(object):
         sharded_inputs = []
         if self.use_demonstrations or (len(unique_task_names)>200 and len(train_data)>=1638400):
             tot = 0
-            for i, curr_train_task in enumerate(unique_task_names):
+            for i, curr_train_task in enumerate(tqdm(unique_task_names)):
                 curr_train_data = [dp for dp in train_data if dp["task"]==curr_train_task]
                 tot += len(curr_train_data)
                 if self.use_demonstrations and len(unique_task_names)>200 and len(train_data)>=1638400:
@@ -512,7 +518,7 @@ class MetaICLData(object):
 
         self.logger.info("Finish saving preprocessed data ...")
 
-    def print_tensorized_example(self, return_string=False):
+    def print_tensorized_example(self, return_string=True):
         assert self.tensorized_inputs is not None
 
         idx = 0

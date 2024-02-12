@@ -194,7 +194,7 @@ class MetaICLModel(object):
         stop_training=False
 
         for epoch in range(num_training_steps):
-            for batch in dataloader:
+            for batch in tqdm(dataloader):
                 global_step += 1
 
                 input_ids=batch[0].to(self.device)

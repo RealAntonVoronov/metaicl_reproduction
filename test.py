@@ -59,7 +59,7 @@ def main(logger, args):
 
     # setup hyperparams for data
 
-    max_length_per_example = 256
+    max_length_per_example = 128
     max_length = 256
     if args.use_demonstrations:
         orig_max_length = max_length
@@ -199,7 +199,7 @@ def run(logger, task, metaicl_data, metaicl_model, train_data, dev_data, seed,
             metaicl_model.cuda()
             metaicl_model.eval()
 
-        losses = metaicl_model.do_inference(metaicl_data, args.test_batch_size)
+        losses = metaicl_model.do_inference(metaicl_data, args.test_batch_size, verbose=True)
         with open(cache_path, "wb") as f:
             pkl.dump(losses, f)
 
