@@ -14,6 +14,7 @@ import json
 import string
 import logging
 import numpy as np
+import wandb
 
 from collections import Counter, defaultdict
 
@@ -23,7 +24,9 @@ from metaicl.data import MetaICLData
 from metaicl.model import MetaICLModel
 from utils.data import load_data
 
+
 def main(logger, args):
+    wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.run_name, config=args)
     if args.gpt2.startswith("gpt2"):
         tokenizer = GPT2Tokenizer.from_pretrained(args.gpt2)
     else:
@@ -126,6 +129,10 @@ if __name__=='__main__':
     parser.add_argument("--fp16", default=False, action="store_true")
     parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
 
+    # wandb args
+    parser.add_argument("--wandb_project", default="MetaICL")
+    parser.add_argument("--wandb_entity", default="antonvoronov")
+    parser.add_argument("--run_name")
     args = parser.parse_args()
 
     handlers = [logging.StreamHandler()]
@@ -137,6 +144,17 @@ if __name__=='__main__':
                         handlers=handlers)
     logging.getLogger("transformers.tokenization_utils").setLevel(logging.ERROR)
     logger = logging.getLogger(__name__)
+
+    args.local_rank = os.environ.get("LOCAL_RANK", -1)
+    args.optimization = args.optimization.lower()
+    if args.run_name is None:
+        model_name = args.gpt2.split('/')[-1].replace('-', '_')
+        args.run_name = f"{args.task}-{model_name}-{args.method}"
+        if args.fp16:
+            args.run_name += '-fp_16'
+        if args.optimization != 'adamw':
+            args.run_name += f"-{args.optimization.replace('-', '_')}"
+        args.run_name += f"-bs_{args.batch_size}"
     logger.info(args)
 
     main(logger, args)

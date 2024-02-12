@@ -8,6 +8,7 @@ import numpy as np
 import os
 import torch
 import torch.nn.functional as F
+import wandb
 
 from tqdm import tqdm
 from transformers import Adafactor, AdamW, get_linear_schedule_with_warmup
@@ -220,6 +221,7 @@ class MetaICLModel(object):
                         scaled_loss.backward()
                 else:
                     loss.backward()
+                wandb.log({"train loss": loss.item()})
 
                 if global_step % gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
