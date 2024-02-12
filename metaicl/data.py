@@ -22,7 +22,7 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Sequentia
 class MetaICLData(object):
 
     def __init__(self, logger=None, tokenizer=None, method="channel", use_demonstrations=True, k=16,
-                 max_length=1024, max_length_per_example=256,
+                 max_length=1024, max_length_per_example=256, input_verbalizer='{}', output_verbalizer='{}',
                  do_tensorize=False, tensorize_dir=None, n_process=None, n_gpu=None, local_rank=-1):
 
         self.logger = logger
@@ -45,6 +45,9 @@ class MetaICLData(object):
         if self.tokenizer is None:
             from transformers import AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+
+        self.input_verbalizer = input_verbalizer
+        self.output_verbalizer = output_verbalizer
 
     def __len__(self):
         if self.tensorized_inputs is None:
@@ -122,21 +125,21 @@ class MetaICLData(object):
             if self.method=="direct":
                 if not is_first:
                     if no_input:
-                        dp["input"] = "\n\n" + dp["input"]
+                        dp["input"] = "\n\n" + self.input_verbalizer.format(dp["input"])
                     else:
-                        dp["input"] = "\n\n\n" + dp["input"]
+                        dp["input"] = "\n\n\n" + self.input_verbalizer.format(dp["input"])
                 if not no_label:
-                    dp["output"] = "\n" + dp["output"]
+                    dp["output"] = "\n" + self.output_verbalizer.format(dp["output"])
                     if "options" in dp:
-                        dp["options"] = ["\n" + opt for opt in dp["options"]]
+                        dp["options"] = ["\n" + self.output_verbalizer.format(opt) for opt in dp["options"]]
             elif self.method=="channel":
                 if not is_first:
-                    dp["output"] = "\n\n\n" + dp["output"]
+                    dp["output"] = "\n\n\n" + self.output_verbalizer.format(dp["output"])
                     if "options" in dp:
-                        dp["options"] = ["\n\n\n" + opt for opt in dp["options"]]
+                        dp["options"] = ["\n\n\n" + self.output_verbalizer.format(opt) for opt in dp["options"]]
                 if not no_input:
                     if not no_label:
-                        dp["input"] = "\n" + dp["input"]
+                        dp["input"] = "\n" + self.input_verbalizer.format(dp["input"])
             else:
                 raise NotImplementedError()
         else:

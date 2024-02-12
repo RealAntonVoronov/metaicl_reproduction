@@ -64,15 +64,15 @@ def main(logger, args):
     if args.use_demonstrations:
         orig_max_length = max_length
         if args.do_zeroshot:
-            max_length = min(max_length * args.k, 1024)
+            max_length = min(max_length_per_example * args.k, 1024)
         else:
-            max_length = min(max_length * args.k, 1024)
+            max_length = min(max_length_per_example * args.k, 1024)
 
     logger.info("batch_size=%d\tmax_length=%d\tmax_length_per_example=%d" % (
         args.test_batch_size, max_length, max_length_per_example))
 
-    metaicl_data = MetaICLData(logger, tokenizer, args.method,args.use_demonstrations, args.k,
-                               max_length, max_length_per_example)
+    metaicl_data = MetaICLData(logger, tokenizer, args.method, args.use_demonstrations, args.k,
+                               max_length, max_length_per_example, args.input_verbalizer, args.output_verbalizer)
 
     results = []
     errors = []
@@ -258,6 +258,9 @@ if __name__=='__main__':
     parser.add_argument("--is_null", default=False, action="store_true")
     parser.add_argument("--method", type=str, default="direct", choices=["direct", "channel"])
     parser.add_argument("--gpt2", type=str, default="gpt2-large")
+
+    parser.add_argument("--input_verbalizer", default='{}')
+    parser.add_argument("--output_verbalizer", default='{}')
 
     args = parser.parse_args()
 
