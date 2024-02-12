@@ -26,7 +26,7 @@ class Gigaword(FewshotGymTextToTextDataset):
         return lines
 
     def load_dataset(self):
-        return datasets.load_dataset('gigaword')
+        return datasets.load_dataset('gigaword', download_mode="force_redownload")
 
 def main():
     dataset = Gigaword()
