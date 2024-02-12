@@ -443,14 +443,20 @@ class MetaICLData(object):
                 self.logger.info("Tensorization was not done. Run with `--do_tensorize` without distributed mode"
                             "and then run training command again")
                 raise NotImplementedError()
-
             if self.local_rank==-1:
-                inputs = defaultdict(list)
-                for i in range(self.n_gpu):
-                    with open(tensorize_path % i, "rb") as f:
-                        curr_inputs = pkl.load(f)
-                    for k, v in curr_inputs.items():
-                        inputs[k] += v
+                if os.path.exists(tensorize_path % -1):
+                    self.logger.info('loading saved tensorized data')
+                    with open(tensorize_path % -1, "rb") as f:
+                        inputs = pkl.load(f)
+                else:
+                    inputs = defaultdict(list)
+                    for i in range(self.n_gpu):
+                        with open(tensorize_path % i, "rb") as f:
+                            curr_inputs = pkl.load(f)
+                        for k, v in curr_inputs.items():
+                            inputs[k] += v
+                    with open(tensorize_path % -1, "wb") as f:
+                        pkl.dump(inputs, f)
             else:
                 assert 0<=self.local_rank<self.n_gpu
                 with open(tensorize_path % self.local_rank, "rb") as f:
