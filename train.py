@@ -127,7 +127,7 @@ if __name__=='__main__':
 
     parser.add_argument("--optimization", type=str, default="adamw")
     parser.add_argument("--fp16", default=False, action="store_true")
-    parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
+    # parser.add_argument("--local-rank", "--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
 
     # wandb args
     parser.add_argument("--wandb_project", default="MetaICL")
