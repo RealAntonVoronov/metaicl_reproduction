@@ -15,7 +15,6 @@ import torch
 from tqdm import tqdm
 
 from collections import defaultdict
-from functools import partial
 from multiprocessing import Pool
 
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
@@ -534,10 +533,9 @@ class MetaICLData(object):
 
         self.logger.info("Finish saving preprocessed data ...")
 
-    def print_tensorized_example(self, return_string=True):
+    def print_tensorized_example(self, idx=0, return_string=True):
         assert self.tensorized_inputs is not None
 
-        idx = 0
         text = "Checking the first example..."
         input_ids = self.tensorized_inputs["input_ids"][idx]
         token_type_ids = self.tensorized_inputs["token_type_ids"][idx]

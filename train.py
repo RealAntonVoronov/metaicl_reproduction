@@ -41,15 +41,15 @@ def main(logger, args):
     logger.info("batch_size=%d\tmax_length=%d\tmax_length_per_example=%d" % (
         args.batch_size, max_length, max_length_per_example))
 
-    train_data = load_data(args.task, "train", args.k, seed=args.seed)
-
-    train_counter = Counter()
-    for dp in train_data:
-        train_counter[dp["task"]] += 1
-    if args.local_rank <= 0:
-        for k, v in train_counter.items():
-            logger.info("[Train] %s\t%d" % (k, v))
-        logger.info("%s on %s (%d train)" % (args.method, args.task, len(train_counter)))
+    # train_data = load_data(args.task, "train", args.k, seed=args.seed)
+    #
+    # train_counter = Counter()
+    # for dp in train_data:
+    #     train_counter[dp["task"]] += 1
+    # if args.local_rank <= 0:
+    #     for k, v in train_counter.items():
+    #         logger.info("[Train] %s\t%d" % (k, v))
+    #     logger.info("%s on %s (%d train)" % (args.method, args.task, len(train_counter)))
 
     if args.init_checkpoint is not None:
         assert os.path.exists(args.init_checkpoint)
@@ -60,6 +60,7 @@ def main(logger, args):
                                do_tensorize=args.do_tensorize,
                                tensorize_dir=args.tensorize_dir,
                                n_process=args.n_process, n_gpu=args.n_gpu, local_rank=args.local_rank)
+    train_data = list(range(940246))
     metaicl_data.tensorize_for_training(train_data, keyword=args.task, seed=args.seed,
                                         use_random_english_words=args.use_random_english_words)
 
