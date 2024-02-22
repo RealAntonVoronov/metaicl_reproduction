@@ -8,15 +8,21 @@ import numpy as np
 import os
 import torch
 import torch.nn.functional as F
-import wandb
 
 from tqdm import tqdm
-from transformers import Adafactor, get_linear_schedule_with_warmup
-from torch.optim import AdamW
+from transformers import Adafactor, AdamW, get_linear_schedule_with_warmup
 from transformers import AutoModelForCausalLM
 
 from utils.utils import get_checkpoint_id, download_file
+try:
+    import nirvana_dl
+except ImportError:
+    nirvana_dl = None
 
+def save_results_nirvana():
+    if nirvana_dl is not None:
+        nirvana_dl.snapshot.dump_snapshot()
+        
 class MetaICLModel(object):
 
     def __init__(self, logger=None, out_dir=None, fp16=True, local_rank=-1):
@@ -84,14 +90,12 @@ class MetaICLModel(object):
         '''
         checkpoint can be either keyword of the model or path to the checkpoint file
         '''
-
-        self.dtype = torch.float16 if self.fp16 else torch.float32
         if checkpoint is not None and checkpoint.startswith("gpt"):
             gpt2 = checkpoint
             checkpoint = None
         if checkpoint is None and "gpt" not in gpt2:
             checkpoint = gpt2
-            # gpt2 = "gpt2-large"
+            gpt2 = "gpt2-large"
         if checkpoint is None:
             if gpt2.startswith("gpt2"):
                 model = AutoModelForCausalLM.from_pretrained(gpt2)
@@ -111,19 +115,14 @@ class MetaICLModel(object):
                     if os.path.exists(checkpoint):
                         self.logger.info("Reusing checkpoint at %s" % checkpoint)
                     else:
-                        self.logger.info(f"Downloading {keyword} in {checkpoint}")
+                        self.logger.info("Downloading %s in %s", keyword, checkpoint)
                     download_file(_id, checkpoint)
 
-            if os.path.exists(checkpoint):
-                if self.local_rank <= 0:
-                    self.logger.info("Loading the model from %s" % checkpoint)
-                state_dict = torch.load(checkpoint)
-                model = AutoModelForCausalLM.from_pretrained(gpt2, torch_dtype=self.dtype, state_dict=state_dict)
-            else:
-                model = AutoModelForCausalLM.from_pretrained(gpt2,
-                                                             # device_map='auto',
-                                                             torch_dtype=self.dtype,
-                                                             )
+            assert os.path.exists(checkpoint), checkpoint
+            if self.local_rank <= 0:
+                self.logger.info("Loading the model from %s" % checkpoint)
+            state_dict = torch.load(checkpoint)
+            model = AutoModelForCausalLM.from_pretrained(gpt2, state_dict=state_dict)
         self.model = model
 
     def save(self, step):
@@ -132,6 +131,7 @@ class MetaICLModel(object):
                                 for key, value in self.model.state_dict().items()}
             torch.save(model_state_dict, os.path.join(self.out_dir, "model-{}.pt".format(step)))
             self.logger.info("Saving model parameters at step=%d" % step)
+            save_results_nirvana()
 
     def setup_optimizer(self, optimization, num_training_steps, lr, weight_decay, warmup_steps):
         no_decay = ['bias', 'LayerNorm.weight']
@@ -152,8 +152,8 @@ class MetaICLModel(object):
                               lr=lr,
                               eps=1e-08,
                               weight_decay=weight_decay)
-            # if self.fp16:
-                # self.model, optimizer = setup_fp16(self.model, optimizer)
+            if self.fp16:
+                self.model, optimizer = setup_fp16(self.model, optimizer)
             if optimization=="adamw":
                 scheduler = get_linear_schedule_with_warmup(optimizer,
                                                             num_warmup_steps=warmup_steps,
@@ -164,16 +164,13 @@ class MetaICLModel(object):
             import bitsandbytes as bnb
             optimizer = bnb.optim.Adam8bit(optimizer_grouped_parameters,
                                            lr=lr, betas=(0.9, 0.995))
-            # if self.fp16:
-                # self.model, optimizer = setup_fp16(self.model, optimizer)
+            if self.fp16:
+                self.model, optimizer = setup_fp16(self.model, optimizer)
             scheduler = get_linear_schedule_with_warmup(optimizer,
                                                         num_warmup_steps=warmup_steps,
                                                         num_training_steps=num_training_steps)
         else:
             raise NotImplementedError()
-
-        if self.fp16:
-            self.scaler = torch.cuda.amp.GradScaler()
 
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -201,7 +198,7 @@ class MetaICLModel(object):
         stop_training=False
 
         for epoch in range(num_training_steps):
-            for batch in tqdm(dataloader):
+            for batch in dataloader:
                 global_step += 1
 
                 input_ids=batch[0].to(self.device)
@@ -222,10 +219,11 @@ class MetaICLModel(object):
                 train_losses.append(loss.detach().cpu())
 
                 if self.fp16:
-                    self.scaler.scale(loss).backward()
+                    from apex import amp
+                    with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                        scaled_loss.backward()
                 else:
                     loss.backward()
-                wandb.log({"train loss": loss.item()})
 
                 if global_step % gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
@@ -282,21 +280,18 @@ class MetaICLModel(object):
         return predictions
 
     def run_model(self, input_ids, attention_mask, token_type_ids, labels=None):
-        with torch.autocast(device_type="cuda", dtype=self.dtype):
-            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        logits = outputs.logits[..., :-1, :].contiguous()
 
-            logits = outputs.logits[..., :-1, :].contiguous()
+        if labels is None:
+            labels = input_ids
+        labels = labels[..., 1:].contiguous()
+        label_mask = token_type_ids[..., 1:].contiguous()
 
-            if labels is None:
-                labels = input_ids
-            labels = labels[..., 1:].contiguous()
-            label_mask = token_type_ids[..., 1:].contiguous()
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+        losses = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)) # [batch_size, length]
 
-            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-            losses = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)) # [batch_size, length]
-
-            losses = losses.view(logits.size(0), logits.size(1)) * label_mask
-
+        losses = losses.view(logits.size(0), logits.size(1)) * label_mask
         return torch.sum(losses, axis=1) / torch.sum(label_mask, axis=1)
 
 def setup_fp16(model, optimizer):
@@ -310,6 +305,4 @@ def setup_fp16(model, optimizer):
     fp16_opt_level = "O1"
     model, optimizer = amp.initialize(model, optimizer, opt_level=fp16_opt_level)
     return model, optimizer
-
-
-
+    
