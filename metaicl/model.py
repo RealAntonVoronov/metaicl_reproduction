@@ -16,6 +16,16 @@ from torch.optim import AdamW
 from transformers import AutoModelForCausalLM
 
 from utils.utils import get_checkpoint_id, download_file
+try:
+    import nirvana_dl
+except ImportError:
+    nirvana_dl = None
+
+
+def save_results_nirvana():
+    if nirvana_dl is not None:
+        nirvana_dl.snapshot.dump_snapshot()
+
 
 class MetaICLModel(object):
 
@@ -132,6 +142,7 @@ class MetaICLModel(object):
                                 for key, value in self.model.state_dict().items()}
             torch.save(model_state_dict, os.path.join(self.out_dir, "model-{}.pt".format(step)))
             self.logger.info("Saving model parameters at step=%d" % step)
+            save_results_nirvana()
 
     def setup_optimizer(self, optimization, num_training_steps, lr, weight_decay, warmup_steps):
         no_decay = ['bias', 'LayerNorm.weight']
