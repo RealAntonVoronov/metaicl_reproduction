@@ -26,7 +26,8 @@ from utils.data import load_data
 
 
 def main(logger, args):
-    wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.run_name, config=args)
+    if args.local_rank <= 0:
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.run_name, config=args)
     if args.gpt2.startswith("gpt2"):
         tokenizer = GPT2Tokenizer.from_pretrained(args.gpt2)
     else:
@@ -128,7 +129,7 @@ if __name__=='__main__':
 
     parser.add_argument("--optimization", type=str, default="adamw")
     parser.add_argument("--fp16", default=False, action="store_true")
-    # parser.add_argument("--local-rank", "--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
+    parser.add_argument("--local-rank", "--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
 
     # wandb args
     parser.add_argument("--wandb_project", default="MetaICL")
@@ -146,7 +147,7 @@ if __name__=='__main__':
     logging.getLogger("transformers.tokenization_utils").setLevel(logging.ERROR)
     logger = logging.getLogger(__name__)
 
-    args.local_rank = os.environ.get("LOCAL_RANK", -1)
+    # args.local_rank = os.environ.get("LOCAL_RANK", -1)
     args.optimization = args.optimization.lower()
     if args.run_name is None:
         model_name = args.gpt2.split('/')[-1].replace('-', '_')

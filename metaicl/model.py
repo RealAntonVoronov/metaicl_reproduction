@@ -236,7 +236,9 @@ class MetaICLModel(object):
                     self.scaler.scale(loss).backward()
                 else:
                     loss.backward()
-                wandb.log({"train loss": loss.item()})
+
+                if self.local_rank <= 0:
+                    wandb.log({"train loss": loss.item()})
 
                 if global_step % gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
