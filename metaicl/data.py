@@ -12,9 +12,9 @@ import numpy as np
 import pickle as pkl
 import math
 import torch
+from tqdm import tqdm
 
 from collections import defaultdict
-from functools import partial
 from multiprocessing import Pool
 
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
@@ -22,8 +22,14 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Sequentia
 class MetaICLData(object):
 
     def __init__(self, logger=None, tokenizer=None, method="channel", use_demonstrations=True, k=16,
-                 max_length=1024, max_length_per_example=256,
-                 do_tensorize=False, tensorize_dir=None, n_process=None, n_gpu=None, local_rank=-1):
+                 max_length=1024, max_length_per_example=256, input_verbalizer='{}', output_verbalizer='{}',
+                 do_tensorize=False, tensorize_dir=None, n_process=None, n_gpu=None, local_rank=-1,
+                 tokenize_with_eos=True):
+        if logger is None:
+            class Logger():
+                def info(self, text):
+                    print("Logging from MetaICLData:\t", text)
+            logger = Logger()
 
         self.logger = logger
         self.tokenizer = tokenizer
@@ -32,6 +38,7 @@ class MetaICLData(object):
         self.k = k
         self.max_length = max_length
         self.max_length_per_example = max_length_per_example
+        self.tokenize_with_eos = tokenize_with_eos
 
         self.do_tensorize = do_tensorize
         self.tensorize_dir = tensorize_dir
@@ -45,6 +52,9 @@ class MetaICLData(object):
         if self.tokenizer is None:
             from transformers import AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+
+        self.input_verbalizer = input_verbalizer
+        self.output_verbalizer = output_verbalizer
 
     def __len__(self):
         if self.tensorized_inputs is None:
@@ -122,21 +132,21 @@ class MetaICLData(object):
             if self.method=="direct":
                 if not is_first:
                     if no_input:
-                        dp["input"] = "\n\n" + dp["input"]
+                        dp["input"] = "\n\n" + self.input_verbalizer.format(dp["input"])
                     else:
-                        dp["input"] = "\n\n\n" + dp["input"]
+                        dp["input"] = "\n\n\n" + self.input_verbalizer.format(dp["input"])
                 if not no_label:
-                    dp["output"] = "\n" + dp["output"]
+                    dp["output"] = "\n" + self.output_verbalizer.format(dp["output"])
                     if "options" in dp:
-                        dp["options"] = ["\n" + opt for opt in dp["options"]]
+                        dp["options"] = ["\n" + self.output_verbalizer.format(opt) for opt in dp["options"]]
             elif self.method=="channel":
                 if not is_first:
-                    dp["output"] = "\n\n\n" + dp["output"]
+                    dp["output"] = "\n\n\n" + self.output_verbalizer.format(dp["output"])
                     if "options" in dp:
-                        dp["options"] = ["\n\n\n" + opt for opt in dp["options"]]
+                        dp["options"] = ["\n\n\n" + self.output_verbalizer.format(opt) for opt in dp["options"]]
                 if not no_input:
                     if not no_label:
-                        dp["input"] = "\n" + dp["input"]
+                        dp["input"] = "\n" + self.input_verbalizer.format(dp["input"])
             else:
                 raise NotImplementedError()
         else:
@@ -158,10 +168,10 @@ class MetaICLData(object):
             else:
                 raise NotImplementedError()
 
-        input_tokens = self.tokenizer(dp["input"])["input_ids"]
+        input_tokens = self._tokenize(dp["input"])
 
         if is_training or for_demonstrations:
-            output_tokens = self.tokenizer(dp["output"])["input_ids"]
+            output_tokens = self._tokenize(dp["output"])
 
             if "task" in dp:
                 if (dp["task"].startswith("inst:piqa") or dp["task"].startswith("inst:yahoo_answers_topics")) and \
@@ -187,8 +197,8 @@ class MetaICLData(object):
 
         else:
             assert len(dp["options"])>=2, dp
-            assert dp["output"] in dp["options"]
-            option_tokens = [self.tokenizer(option)["input_ids"] for option in dp["options"]]
+            assert dp["output"] in dp["options"], f"output: {[dp['output']]}, options: {dp['options']}"
+            option_tokens = [self._tokenize(option) for option in dp["options"]]
             option_length = np.max([len(option) for option in option_tokens])
 
             if len(input_tokens)>=self.max_length_per_example - 2 - option_length:
@@ -204,6 +214,12 @@ class MetaICLData(object):
                 return output_tokens, input_tokens, option_tokens
             else:
                 raise NotImplementedError()
+
+    def _tokenize(self, text):
+        if self.tokenize_with_eos:
+            return self.tokenizer(text)["input_ids"]
+        else:
+            return self.tokenizer(text, add_special_tokens=False)["input_ids"]
 
     def _tensorize_for_training(self, train_data):
         for dp in train_data:
@@ -235,7 +251,7 @@ class MetaICLData(object):
                     return [r]
                 return [r] + _draw_random(tot, n-1, exclude_indices | set([r]))
 
-            for dp_idx, dp in enumerate(train_data):
+            for dp_idx, dp in enumerate(tqdm(train_data)):
                 for _ in range(N):
                     demo_indices = _draw_random(len(train_data), self.k, set([dp_idx]))
                     inputs = []
@@ -250,7 +266,7 @@ class MetaICLData(object):
 
                     encoded = prepro_sentence_pair_single(
                         inputs, outputs, self.max_length, bos_token_id, eos_token_id,
-                        allow_truncation=True)
+                        allow_truncation=True, tokenize_with_eos=self.tokenize_with_eos)
 
                     input_ids.append(encoded[0])
                     attention_mask.append(encoded[1])
@@ -262,7 +278,8 @@ class MetaICLData(object):
                     dp, is_first=True, is_training=True)
 
                 encoded = prepro_sentence_pair_single(
-                    inputs, outputs, self.max_length, bos_token_id, eos_token_id)
+                    inputs, outputs, self.max_length, bos_token_id, eos_token_id,
+                    tokenize_with_eos=self.tokenize_with_eos)
 
                 input_ids.append(encoded[0])
                 attention_mask.append(encoded[1])
@@ -319,7 +336,7 @@ class MetaICLData(object):
                     inputs += inputs_
                     encoded = prepro_sentence_pair_single(
                         inputs, outputs, self.max_length, bos_token_id, eos_token_id,
-                        allow_truncation=True)
+                        allow_truncation=True, tokenize_with_eos=self.tokenize_with_eos)
                     input_ids.append(encoded[0])
                     attention_mask.append(encoded[1])
                     token_type_ids.append(encoded[2])
@@ -332,7 +349,8 @@ class MetaICLData(object):
                 inputs, outputs = self._prepro_each_datapoint(
                     dp, is_first=True, is_training=True)
                 encoded = prepro_sentence_pair_single(
-                    inputs, outputs, self.max_length, bos_token_id, eos_token_id)
+                    inputs, outputs, self.max_length, bos_token_id, eos_token_id,
+                    tokenize_with_eos=self.tokenize_with_eos)
 
                 input_ids.append(encoded[0])
                 attention_mask.append(encoded[1])
@@ -396,7 +414,7 @@ class MetaICLData(object):
 
                 encoded = prepro_sentence_pair_single(
                     inputs_, outputs_, self.max_length, bos_token_id, eos_token_id,
-                    allow_truncation=self.use_demonstrations)
+                    allow_truncation=self.use_demonstrations, tokenize_with_eos=self.tokenize_with_eos)
 
                 input_ids.append(encoded[0])
                 attention_mask.append(encoded[1])
@@ -434,14 +452,20 @@ class MetaICLData(object):
                 self.logger.info("Tensorization was not done. Run with `--do_tensorize` without distributed mode"
                             "and then run training command again")
                 raise NotImplementedError()
-
             if self.local_rank==-1:
-                inputs = defaultdict(list)
-                for i in range(self.n_gpu):
-                    with open(tensorize_path % i, "rb") as f:
-                        curr_inputs = pkl.load(f)
-                    for k, v in curr_inputs.items():
-                        inputs[k] += v
+                if os.path.exists(tensorize_path % -1):
+                    self.logger.info('loading saved tensorized data')
+                    with open(tensorize_path % -1, "rb") as f:
+                        inputs = pkl.load(f)
+                else:
+                    inputs = defaultdict(list)
+                    for i in range(self.n_gpu):
+                        with open(tensorize_path % i, "rb") as f:
+                            curr_inputs = pkl.load(f)
+                        for k, v in curr_inputs.items():
+                            inputs[k] += v
+                    with open(tensorize_path % -1, "wb") as f:
+                        pkl.dump(inputs, f)
             else:
                 assert 0<=self.local_rank<self.n_gpu
                 with open(tensorize_path % self.local_rank, "rb") as f:
@@ -459,7 +483,7 @@ class MetaICLData(object):
         sharded_inputs = []
         if self.use_demonstrations or (len(unique_task_names)>200 and len(train_data)>=1638400):
             tot = 0
-            for i, curr_train_task in enumerate(unique_task_names):
+            for i, curr_train_task in enumerate(tqdm(unique_task_names)):
                 curr_train_data = [dp for dp in train_data if dp["task"]==curr_train_task]
                 tot += len(curr_train_data)
                 if self.use_demonstrations and len(unique_task_names)>200 and len(train_data)>=1638400:
@@ -509,10 +533,9 @@ class MetaICLData(object):
 
         self.logger.info("Finish saving preprocessed data ...")
 
-    def print_tensorized_example(self, return_string=False):
+    def print_tensorized_example(self, idx=0, return_string=True):
         assert self.tensorized_inputs is not None
 
-        idx = 0
         text = "Checking the first example..."
         input_ids = self.tensorized_inputs["input_ids"][idx]
         token_type_ids = self.tensorized_inputs["token_type_ids"][idx]
@@ -534,12 +557,13 @@ class MetaICLData(object):
 
 def prepro_sentence_pair_single(ids1, ids2, max_length,
                                 bos_token_id, eos_token_id,
-                                allow_truncation=False):
+                                allow_truncation=False, tokenize_with_eos=True):
 
-    #if bos_token_id is not None:
-    #    ids1 = [bos_token_id] + ids1
-    #if eos_token_id is not None:
-    #    ids2 = ids2 + [eos_token_id]
+    if not tokenize_with_eos:
+        if bos_token_id is not None:
+           ids1 = [bos_token_id] + ids1
+        if eos_token_id is not None:
+           ids2 = ids2 + [eos_token_id]
     if allow_truncation and len(ids1)+len(ids2) > max_length:
         ids1 = ids1[len(ids1)+len(ids2)-max_length:] # len = max_length-len(ids2)
         assert len(ids1)+len(ids2)==max_length
@@ -553,14 +577,15 @@ def prepro_sentence_pair_single(ids1, ids2, max_length,
 
 def prepro_sentence_pair(train_inputs, test_inputs, max_length,
                          bos_token_id, eos_token_id,
-                         allow_truncation=False):
+                         allow_truncation=False, tokenize_with_eos=True):
     input_ids, attention_mask, token_type_ids = [], [], []
     for test_input in test_inputs:
         for train_input in train_inputs:
             _input_ids, _attention_mask, _token_type_ids = \
                 prepro_sentence_pair_single(train_input, test_input, max_length,
                                             bos_token_id, eos_token_id,
-                                            allow_truncation=allow_truncation)
+                                            allow_truncation=allow_truncation,
+                                            tokenize_with_eos=tokenize_with_eos)
             input_ids.append(_input_ids)
             attention_mask.append(_attention_mask)
             token_type_ids.append(_token_type_ids)

@@ -14,6 +14,7 @@ import json
 import string
 import logging
 import numpy as np
+import wandb
 
 from collections import Counter, defaultdict
 
@@ -23,11 +24,13 @@ from metaicl.data import MetaICLData
 from metaicl.model import MetaICLModel
 from utils.data import load_data
 
+
 def main(logger, args):
+    wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.run_name, config=args)
     if args.gpt2.startswith("gpt2"):
         tokenizer = GPT2Tokenizer.from_pretrained(args.gpt2)
     else:
-        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        tokenizer = AutoTokenizer.from_pretrained(args.gpt2)
 
     batch_size = args.batch_size
     max_length_per_example = 256
@@ -38,15 +41,15 @@ def main(logger, args):
     logger.info("batch_size=%d\tmax_length=%d\tmax_length_per_example=%d" % (
         args.batch_size, max_length, max_length_per_example))
 
-    train_data = load_data(args.task, "train", args.k, seed=args.seed)
-
-    train_counter = Counter()
-    for dp in train_data:
-        train_counter[dp["task"]] += 1
-    if args.local_rank <= 0:
-        for k, v in train_counter.items():
-            logger.info("[Train] %s\t%d" % (k, v))
-        logger.info("%s on %s (%d train)" % (args.method, args.task, len(train_counter)))
+    # train_data = load_data(args.task, "train", args.k, seed=args.seed)
+    #
+    # train_counter = Counter()
+    # for dp in train_data:
+    #     train_counter[dp["task"]] += 1
+    # if args.local_rank <= 0:
+    #     for k, v in train_counter.items():
+    #         logger.info("[Train] %s\t%d" % (k, v))
+    #     logger.info("%s on %s (%d train)" % (args.method, args.task, len(train_counter)))
 
     if args.init_checkpoint is not None:
         assert os.path.exists(args.init_checkpoint)
@@ -57,6 +60,7 @@ def main(logger, args):
                                do_tensorize=args.do_tensorize,
                                tensorize_dir=args.tensorize_dir,
                                n_process=args.n_process, n_gpu=args.n_gpu, local_rank=args.local_rank)
+    train_data = list(range(940246))
     metaicl_data.tensorize_for_training(train_data, keyword=args.task, seed=args.seed,
                                         use_random_english_words=args.use_random_english_words)
 
@@ -124,8 +128,12 @@ if __name__=='__main__':
 
     parser.add_argument("--optimization", type=str, default="adamw")
     parser.add_argument("--fp16", default=False, action="store_true")
-    parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
+    # parser.add_argument("--local-rank", "--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
 
+    # wandb args
+    parser.add_argument("--wandb_project", default="MetaICL")
+    parser.add_argument("--wandb_entity", default="antonvoronov")
+    parser.add_argument("--run_name")
     args = parser.parse_args()
 
     handlers = [logging.StreamHandler()]
@@ -137,6 +145,17 @@ if __name__=='__main__':
                         handlers=handlers)
     logging.getLogger("transformers.tokenization_utils").setLevel(logging.ERROR)
     logger = logging.getLogger(__name__)
+
+    args.local_rank = os.environ.get("LOCAL_RANK", -1)
+    args.optimization = args.optimization.lower()
+    if args.run_name is None:
+        model_name = args.gpt2.split('/')[-1].replace('-', '_')
+        args.run_name = f"{args.task}-{model_name}-{args.method}"
+        if args.fp16:
+            args.run_name += '-fp_16'
+        if args.optimization != 'adamw':
+            args.run_name += f"-{args.optimization.replace('-', '_')}"
+        args.run_name += f"-bs_{args.batch_size}"
     logger.info(args)
 
     main(logger, args)
