@@ -168,7 +168,7 @@ class MetaICLModel(object):
 
     def parallel(self):
         if self.n_gpu > 1:
-            self.model = torch.nn.DataParallel(self.model)
+            self.model = torch.nn.DataParallel(self.model, device_ids = [i for i in range(self.n_gpu)])
 
         if self.local_rank != -1:
             self.model = torch.nn.parallel.DistributedDataParallel(
