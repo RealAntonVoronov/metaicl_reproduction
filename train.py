@@ -86,7 +86,7 @@ def main(logger, args):
 
     metaicl_model = MetaICLModel(logger, args.out_dir, args.fp16, args.local_rank)
     metaicl_model.load(args.init_checkpoint, args.gpt2)
-    metaicl_model.to_device()
+    # metaicl_model.to_device()
     metaicl_model.setup_optimizer(args.optimization, num_training_steps, args.lr,
                                   args.weight_decay, args.warmup_steps)
     metaicl_model.parallel()
