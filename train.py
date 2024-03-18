@@ -49,8 +49,10 @@ def cleanup():
 
 
 
-def main(rank, world_size, logger, args):
-
+def main(logger, args):
+    rank = args.local_rank
+    world_size = torch.cuda.device_count()
+    
     setup(rank, world_size)
     
     if rank == 0:
@@ -164,7 +166,7 @@ if __name__=='__main__':
 
     parser.add_argument("--optimization", type=str, default="adamw")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"])
-    #parser.add_argument("--local-rank", "--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
+    parser.add_argument("--local-rank", "--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
 
     # wandb args
     parser.add_argument("--wandb_project", default="MetaICL")
@@ -194,8 +196,9 @@ if __name__=='__main__':
 
     torch.manual_seed(args.seed)
 
-    WORLD_SIZE = torch.cuda.device_count()
-    mp.spawn(main,
-        args=(WORLD_SIZE, logger, args),
-        nprocs=WORLD_SIZE,
-        join=True)
+    main(logger, args)
+    # WORLD_SIZE = torch.cuda.device_count()
+    # mp.spawn(main,
+    #     args=(WORLD_SIZE, logger, args),
+    #     nprocs=WORLD_SIZE,
+    #     join=True)
