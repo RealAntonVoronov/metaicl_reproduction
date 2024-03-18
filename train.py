@@ -6,6 +6,7 @@
 
 import os
 import argparse
+import functools
 import pickle as pkl
 import random
 import torch
@@ -23,11 +24,42 @@ from transformers import GPT2Tokenizer, AutoTokenizer
 from metaicl.data import MetaICLData
 from metaicl.model import MetaICLModel
 from utils.data import load_data
+import torch.distributed as dist
+
+import torch.multiprocessing as mp
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    CPUOffload,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.wrap import (
+    size_based_auto_wrap_policy,
+    enable_wrap,
+    wrap,
+)
+
+def setup(rank, world_size):
+    #os.environ['MASTER_ADDR'] = 'localhost'
+    #os.environ['MASTER_PORT'] = '12355'
+
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
 
 
-def main(logger, args):
-    if args.local_rank <= 0:
+
+def main(rank, world_size, logger, args):
+
+    setup(rank, world_size)
+    
+    if rank == 0:
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.run_name, config=args)
+
+    my_auto_wrap_policy = functools.partial(
+        size_based_auto_wrap_policy, min_num_params=100
+    )
+    torch.cuda.set_device(rank)
         
     if args.gpt2.startswith("gpt2"):
         tokenizer = GPT2Tokenizer.from_pretrained(args.gpt2)
@@ -61,7 +93,7 @@ def main(logger, args):
                                args.test_k, max_length, max_length_per_example,
                                do_tensorize=args.do_tensorize,
                                tensorize_dir=args.tensorize_dir,
-                               n_process=args.n_process, n_gpu=args.n_gpu, local_rank=args.local_rank)
+                               n_process=args.n_process, n_gpu=args.n_gpu, local_rank=rank)
     train_data = list(range(940246))
     metaicl_data.tensorize_for_training(train_data, keyword=args.task, seed=args.seed,
                                         use_random_english_words=args.use_random_english_words)
@@ -87,17 +119,19 @@ def main(logger, args):
 
     logger.info(args.out_dir)
 
-    if args.local_rank<=0 and not os.path.exists(args.out_dir):
+    if rank<=0 and not os.path.exists(args.out_dir):
         os.makedirs(args.out_dir)
 
-    metaicl_model = MetaICLModel(logger, args.out_dir, args.dtype, args.local_rank)
+    metaicl_model = MetaICLModel(logger, args.out_dir, args.dtype, rank)
     metaicl_model.load(args.init_checkpoint, args.gpt2)
-    metaicl_model.to_device()
     metaicl_model.setup_optimizer(args.optimization, num_training_steps, args.lr,
                                  args.weight_decay, args.warmup_steps)
-    metaicl_model.parallel()
+    metaicl_model.to_device(rank)
+    metaicl_model.fsdp()
     metaicl_model.train()
-    metaicl_model.do_train(metaicl_data, args.batch_size, num_training_steps, save_period, log_period)
+    metaicl_model.do_train(metaicl_data, args.batch_size, num_training_steps, save_period, log_period, rank, world_size)
+
+    cleanup()
 
 if __name__=='__main__':
 
@@ -130,7 +164,7 @@ if __name__=='__main__':
 
     parser.add_argument("--optimization", type=str, default="adamw")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"])
-    parser.add_argument("--local-rank", "--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
+    #parser.add_argument("--local-rank", "--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
 
     # wandb args
     parser.add_argument("--wandb_project", default="MetaICL")
@@ -148,7 +182,6 @@ if __name__=='__main__':
     logging.getLogger("transformers.tokenization_utils").setLevel(logging.ERROR)
     logger = logging.getLogger(__name__)
 
-    # args.local_rank = os.environ.get("LOCAL_RANK", -1)
     args.optimization = args.optimization.lower()
     if args.run_name is None:
         model_name = args.gpt2.split('/')[-1].replace('-', '_')
@@ -159,4 +192,10 @@ if __name__=='__main__':
         args.run_name += f"-bs_{args.batch_size}"
     logger.info(args)
 
-    main(logger, args)
+    torch.manual_seed(args.seed)
+
+    WORLD_SIZE = torch.cuda.device_count()
+    mp.spawn(main,
+        args=(WORLD_SIZE, logger, args),
+        nprocs=WORLD_SIZE,
+        join=True)

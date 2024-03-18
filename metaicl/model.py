@@ -9,13 +9,27 @@ import os
 import torch
 import torch.nn.functional as F
 import wandb
+import functools
 
 from tqdm import tqdm
 from transformers import Adafactor, get_linear_schedule_with_warmup
 from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from utils.utils import get_checkpoint_id, download_file
+
+import torch.multiprocessing as mp
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    CPUOffload,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.wrap import (
+    size_based_auto_wrap_policy,
+    enable_wrap,
+    wrap,
+)
+
 try:
     import nirvana_dl
 except ImportError:
@@ -41,21 +55,21 @@ class MetaICLModel(object):
         self.dtype = dtype
         self.local_rank = local_rank
 
-        if self.local_rank == -1:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            n_gpu = torch.cuda.device_count()
-            ws = 1
-        else:  # distributed mode
-            torch.cuda.set_device(local_rank)
-            device = torch.device("cuda", local_rank)
-            ws = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", 1)))
-            torch.distributed.init_process_group(backend="nccl")
-            n_gpu = 1
+        # if self.local_rank == -1:
+        #     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        #     n_gpu = torch.cuda.device_count()
+        #     ws = 1
+        # else:  # distributed mode
+        #     torch.cuda.set_device(local_rank)
+        #     device = torch.device("cuda", local_rank)
+        #     ws = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", 1)))
+        #     torch.distributed.init_process_group(backend="nccl")
+        #     n_gpu = 1
 
-        self.n_gpu = n_gpu
-        self.device = device
-        if self.local_rank <= 0:
-            logger.info("Setting up for local_rank=%d, world_size=%d" % (self.local_rank, ws))
+        #self.n_gpu = n_gpu
+        self.device = torch.device("cuda", local_rank)
+        # if self.local_rank <= 0:
+        #     logger.info("Setting up for local_rank=%d, world_size=%d" % (self.local_rank, ws))
         self.model_name = None
         self.model = None
         self.mode = None
@@ -87,8 +101,12 @@ class MetaICLModel(object):
     def cuda(self):
         self.model.cuda()
 
-    def to_device(self):
-        self.model.to(self.device)
+    def to_device(self, device=None):
+        if device is None:
+            self.model.to(self.device)
+        else:
+            self.model.to(device)
+
 
     def load(self, checkpoint=None, gpt2="gpt2-large"):
         '''
@@ -100,52 +118,44 @@ class MetaICLModel(object):
             self.dtype = torch.bfloat16
         else:
             self.dtype = torch.float32
-        if checkpoint is not None and checkpoint.startswith("gpt"):
-            gpt2 = checkpoint
-            checkpoint = None
-        if checkpoint is None and "gpt" not in gpt2:
-            checkpoint = gpt2
-            # gpt2 = "gpt2-large"
-        if checkpoint is None:
-            if gpt2.startswith("gpt2"):
-                model = AutoModelForCausalLM.from_pretrained(gpt2)
-            elif "gpt-j" in gpt2:
-                model = AutoModelForCausalLM.from_pretrained("EleutherAI/gpt-j-6B") #/gpt2)
-            else:
-                raise NotImplementedError(checkpoint)
-            self.model_name = gpt2
-        else:
-            self.model_name = checkpoint
-            _id = get_checkpoint_id(checkpoint)
-            if _id is not None:
-                method, setting, _id = _id
-                keyword = checkpoint
-                checkpoint = os.path.join("checkpoints", method, setting)
-                if self.local_rank <= 0:
-                    if os.path.exists(checkpoint):
-                        self.logger.info("Reusing checkpoint at %s" % checkpoint)
-                    else:
-                        self.logger.info(f"Downloading {keyword} in {checkpoint}")
-                    download_file(_id, checkpoint)
+            
+        # if checkpoint is not None and checkpoint.startswith("gpt"):
+        #     gpt2 = checkpoint
+        #     checkpoint = None
+        # if checkpoint is None and "gpt" not in gpt2:
+        #     checkpoint = gpt2
+        #     # gpt2 = "gpt2-large"
+        # if checkpoint is None:
+        #     if gpt2.startswith("gpt2"):
+        #         model = AutoModelForCausalLM.from_pretrained(gpt2)
+        #     elif "gpt-j" in gpt2:
+        #         model = AutoModelForCausalLM.from_pretrained("EleutherAI/gpt-j-6B") #/gpt2)
+        #     else:
+        #         raise NotImplementedError(checkpoint)
+        #     self.model_name = gpt2
+        # else:
+        #     self.model_name = checkpoint
+        #     _id = get_checkpoint_id(checkpoint)
+        #     if _id is not None:
+        #         method, setting, _id = _id
+        #         keyword = checkpoint
+        #         checkpoint = os.path.join("checkpoints", method, setting)
+        #         if self.local_rank <= 0:
+        #             if os.path.exists(checkpoint):
+        #                 self.logger.info("Reusing checkpoint at %s" % checkpoint)
+        #             else:
+        #                 self.logger.info(f"Downloading {keyword} in {checkpoint}")
+        #             download_file(_id, checkpoint)
 
-            if os.path.exists(checkpoint):
-                if self.local_rank <= 0:
-                    self.logger.info("Loading the model from %s" % checkpoint)
-                state_dict = torch.load(checkpoint)
-                model = AutoModelForCausalLM.from_pretrained(gpt2, torch_dtype=self.dtype, state_dict=state_dict)
-            else:
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=self.dtype,
-                    bnb_4bit_use_double_quant=True,
-                )
-                model = AutoModelForCausalLM.from_pretrained(gpt2,
-                                                             quantization_config=bnb_config,
-                                                             trust_remote_code=True,
-                                                             low_cpu_mem_usage=True,
-                                                             device_map="auto"
-                                                             )
+        #     if os.path.exists(checkpoint):
+        #         if self.local_rank <= 0:
+        #             self.logger.info("Loading the model from %s" % checkpoint)
+        #         state_dict = torch.load(checkpoint)
+        #         model = AutoModelForCausalLM.from_pretrained(gpt2, torch_dtype=self.dtype, state_dict=state_dict)
+        #     else:
+        #         model = AutoModelForCausalLM.from_pretrained(gpt2, torch_dtype=self.dtype)
+
+        model = AutoModelForCausalLM.from_pretrained(gpt2, torch_dtype=self.dtype)
         self.model = model
 
     def save(self, step):
@@ -201,22 +211,25 @@ class MetaICLModel(object):
         self.optimizer = optimizer
         self.scheduler = scheduler
 
-    def parallel(self):
-        if self.n_gpu > 1:
-            self.model = torch.nn.DataParallel(self.model)
+    # def parallel(self):
+    #     if self.n_gpu > 1:
+    #         self.model = torch.nn.DataParallel(self.model)
 
-        if self.local_rank != -1:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                self.model, device_ids=[self.local_rank], output_device=self.local_rank)
+    #     if self.local_rank != -1:
+    #         self.model = torch.nn.parallel.DistributedDataParallel(
+    #             self.model, device_ids=[self.local_rank], output_device=self.local_rank)
 
+    def fsdp(self):
+        self.model = FSDP(self.model).to(dtype=self.dtype)
 
-    def do_train(self, data, batch_size, num_training_steps, save_period, log_period,
+    def do_train(self, data, batch_size, num_training_steps, save_period, log_period, rank, world_size,
                  gradient_accumulation_steps=1, max_grad_norm=1.0):
         dataloader = data.get_dataloader(batch_size, is_training=True)
+        
         n_trainable_params = len([param for param in self.model.parameters() if param.requires_grad])
-        n_gpus = torch.cuda.device_count()
-        self.logger.info("Training {} parameters on {} examples for {} steps using {} GPUs".format(
-            n_trainable_params, len(data), num_training_steps, self.n_gpu))
+        # n_gpus = torch.cuda.device_count()
+        # self.logger.info("Training {} parameters on {} examples for {} steps using {} GPUs".format(
+        #     n_trainable_params, len(data), num_training_steps, self.n_gpu))
 
         global_step = 0
         train_losses = []
@@ -224,24 +237,30 @@ class MetaICLModel(object):
         stop_training=False
 
         for epoch in range(num_training_steps):
+            #ddp_loss = torch.zeros(2).to(rank)
             for batch in tqdm(dataloader):
                 global_step += 1
 
-                input_ids=batch[0].to(self.device)
-                attention_mask=batch[1].to(self.device)
-                token_type_ids=batch[2].to(self.device)
+                input_ids=batch[0].to(rank)
+                attention_mask=batch[1].to(rank)
+                token_type_ids=batch[2].to(rank)
+                
                 if len(batch)==3:
                     labels=None
                 else:
-                    labels=batch[3].to(self.device)
+                    labels=batch[3].to(rank)
 
                 loss = self.run_model(input_ids, attention_mask, token_type_ids, labels=labels)
                 loss = loss.mean()
+
+                #ddp_loss[0] += loss.item()
+                #ddp_loss[1] += len(input_ids)
 
                 if torch.isnan(loss).data:
                     print ("Stop training because loss=%s" % (loss.data))
                     stop_training=True
                     break
+                    
                 train_losses.append(loss.detach().cpu())
 
                 if self.dtype == "float16":
@@ -249,17 +268,21 @@ class MetaICLModel(object):
                 else:
                     loss.backward()
                     
-                if self.local_rank <= 0:
+                if self.local_rank == 0:
                     wandb.log({"train loss": loss.item()})
 
                 if global_step % gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
 
-                    self.scaler.unscale_(self.optimizer)
-                    self.scaler.step(self.optimizer) # We have accumulated enough gradients
-                    self.scaler.update()    
+                    if self.dtype == "float16":
+                        self.scaler.unscale_(self.optimizer)
+                        self.scaler.step(self.optimizer) # We have accumulated enough gradients
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
                     if self.scheduler is not None:
                         self.scheduler.step()
+                        
                     self.model.zero_grad()
 
                 if global_step % log_period == 0:

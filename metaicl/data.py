@@ -19,6 +19,9 @@ from multiprocessing import Pool
 
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+
 class MetaICLData(object):
 
     def __init__(self, logger=None, tokenizer=None, method="channel", use_demonstrations=True, k=16,
@@ -88,10 +91,7 @@ class MetaICLData(object):
             dataset = TensorDataset(inputs["input_ids"], inputs["attention_mask"], inputs["token_type_ids"], inputs["labels"])
         else:
             dataset = TensorDataset(inputs["input_ids"], inputs["attention_mask"], inputs["token_type_ids"])
-        if is_training:
-            sampler=RandomSampler(dataset)
-        else:
-            sampler=SequentialSampler(dataset)
+        sampler=DistributedSampler(dataset, num_replicas=dist.get_world_size(), rank=dist.get_rank())
         dataloader = DataLoader(dataset, sampler=sampler, batch_size=batch_size)
         return dataloader
 
